@@ -5,9 +5,7 @@ import java.nio.file.Path
 import java.time.ZonedDateTime
 
 import cats.effect.Effect
-import cats.syntax.applicativeError._
 import cats.syntax.apply._
-import cats.syntax.either._
 import cats.syntax.flatMap._
 import cats.syntax.functor._
 import com.google.common.io.Files
@@ -19,7 +17,7 @@ import io.github.portfoligno.sagfs.settings.GitStorageSettings
 import org.eclipse.jgit.api.Git
 import org.eclipse.jgit.api.ResetCommand.ResetType
 import org.eclipse.jgit.lib.Constants
-import org.eclipse.jgit.transport.RefSpec
+import org.eclipse.jgit.transport.{RefSpec, RemoteRefUpdate}
 
 import scala.collection.JavaConverters._
 import scala.concurrent.ExecutionContext
@@ -84,7 +82,7 @@ class RemoteGitStorage[F[_]](uri: String, branch: String)
   // Add, commit and push
   private
   def addCommitPush(git: Git, path: Path)
-    (implicit settings: GitStorageSettings): F[Unit] = {
+    (implicit settings: GitStorageSettings): F[Boolean] = {
     val add = delay {
       git
         .add()
@@ -105,8 +103,11 @@ class RemoteGitStorage[F[_]](uri: String, branch: String)
         .push()
         .setRefSpecs(new RefSpec(s"refs/heads/master:$branchRef"))
         .call()
+        .asScala
+        .flatMap(_.getRemoteUpdates.asScala)
+        .forall(_.getStatus == RemoteRefUpdate.Status.OK)
     }
-    add *> commit *> push *> unit
+    add *> commit *> push
   }
 
   // Only relative paths are relevant
@@ -127,15 +128,23 @@ class RemoteGitStorage[F[_]](uri: String, branch: String)
     absolutePath = directory.toPath.resolve(path)
 
     actions = { git: Git =>
-      fetchReset(git, allowEmpty = true) *> // Update local files
-        bytes.to(writeAllAsync(absolutePath)).compile.drain *> // Write all bytes
-        addCommitPush(git, path) // Push
+      def loop(attempts: Int): F[Unit] = {
+        fetchReset(git, allowEmpty = true) *> // Update local files
+          bytes.to(writeAllAsync(absolutePath)).compile.drain *> // Write all bytes
+          addCommitPush(git, path) // Push
+      }
+        .flatMap {
+          case false if attempts > 1 =>
+            loop(attempts - 1)
+          case true =>
+            unit
+          case _ =>
+            raiseError(new IllegalStateException(s"Failed to update $path at $branch of $uri"))
+        }
+
+      loop(5)
     }
-    attemptActions = { git: Git =>
-      // Retry infinitely by now
-      git.tailRecM(actions.andThen(_.attempt.map(_.leftMap { e => e.printStackTrace(); git })))
-    }
-    _ <- bracket(open(directory))(attemptActions)(close) // Resource handling
+    _ <- bracket(open(directory))(actions)(close) // Resource handling
   }
     yield ()
 
