@@ -1,7 +1,6 @@
 package io.github.portfoligno.sagfs.impl
 
 import java.io.File
-import java.nio.file.Path
 import java.time.ZonedDateTime
 
 import cats.effect.Effect
@@ -14,6 +13,8 @@ import fs2.async.once
 import fs2.io.file.{readAllAsync, writeAllAsync}
 import io.github.portfoligno.sagfs.GitStorage
 import io.github.portfoligno.sagfs.settings.GitStorageSettings
+import io.github.portfoligno.scala.path.relative.RelativePath
+import io.github.portfoligno.scala.path.relative.syntax._
 import org.eclipse.jgit.api.Git
 import org.eclipse.jgit.api.ResetCommand.ResetType
 import org.eclipse.jgit.lib.Constants
@@ -81,7 +82,7 @@ class RemoteGitStorage[F[_]](uri: String, branch: String)
 
   // Add, commit and push
   private
-  def addCommitPush(git: Git, path: Path)
+  def addCommitPush(git: Git, path: RelativePath)
     (implicit settings: GitStorageSettings): F[Boolean] = {
     val add = delay {
       git
@@ -110,10 +111,6 @@ class RemoteGitStorage[F[_]](uri: String, branch: String)
     add *> commit *> push
   }
 
-  // Only relative paths are relevant
-  private
-  def checkIsRelative(path: Path): F[Unit] = delay(require(!path.isAbsolute, path))
-
   // Resource handling
   private
   def open(directory: File): F[Git] = delay(Git.open(directory))
@@ -122,9 +119,9 @@ class RemoteGitStorage[F[_]](uri: String, branch: String)
 
   // Write bytes
   override
-  def put(path: Path, bytes: Stream[F, Byte])
+  def put(path: RelativePath, bytes: Stream[F, Byte])
     (implicit settings: GitStorageSettings): F[Unit] = for {
-    directory <- checkIsRelative(path) *> _clone.flatten
+    directory <- _clone.flatten
     absolutePath = directory.toPath.resolve(path)
 
     actions = { git: Git =>
@@ -150,8 +147,8 @@ class RemoteGitStorage[F[_]](uri: String, branch: String)
 
   // Read bytes
   override
-  def get(path: Path): Stream[F, Byte] = for {
-    directory <- Stream.eval(checkIsRelative(path) *> _clone.flatten)
+  def get(path: RelativePath): Stream[F, Byte] = for {
+    directory <- Stream.eval(_clone.flatten)
     absolutePath = directory.toPath.resolve(path)
 
     actions = { git: Git =>
